@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gptfast"
+version = "0.1.0"
+description = "A simple, fast, pure PyTorch Llama inference engine"
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+requires-python = ">=3.8"
+dependencies = [
+  "tiktoken",
+  "torch",
+  "sentencepiece"
+]
+
+[project.urls]
+Homepage = "https://github.com/CALL-Lab/gpt-fast"
+Issues = "https://github.com/CALL-Lab/gpt-fast/issues"
