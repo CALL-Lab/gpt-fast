@@ -4,7 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,11 +12,33 @@ from torch import Tensor
 from torch.nn import functional as F
 
 
+# The smallest multiple of k that is greater than or equal to n
 def find_multiple(n: int, k: int) -> int:
     if n % k == 0:
         return n
     return n + k - (n % k)
 
+# The output of a transformer model
+# including the logits and intermediate variables
+@dataclass
+class TransformerOutput:
+    logits: Tensor
+    hidden_states: Optional[Tuple[Tensor]]
+    attentions: Optional[Tuple[Tensor]]
+
+# The output of a single layer in a transformer model
+@dataclass
+class TransformerBlockOutput:
+    hidden_state: Tensor
+    attention: Optional[Tensor]
+
+# The output of attention
+@dataclass
+class AttentionOutput:
+    attention_output: Tensor
+    attention_weights: Optional[Tensor]
+
+# Hyperparams of a LLM
 @dataclass
 class ModelArgs:
     block_size: int = 2048
@@ -29,6 +51,10 @@ class ModelArgs:
     head_dim: int = 64
     rope_base: float = 10000
     norm_eps: float = 1e-5
+    max_batch_size: int = 1
+    max_seq_length: int = 128
+    output_hidden_states:bool = False
+    output_attentions:bool = False
 
     def __post_init__(self):
         if self.n_local_heads == -1:
@@ -86,6 +112,24 @@ class KVCache(nn.Module):
 
         return k_out, v_out
 
+class KVCache(nn.Module):
+    def __init__(self, max_batch_size, max_seq_length, n_heads, head_dim, dtype=torch.bfloat16):
+        super().__init__()
+        cache_shape = (max_batch_size, n_heads, max_seq_length, head_dim)
+        self.register_buffer('k_cache', torch.zeros(cache_shape, dtype=dtype))
+        self.register_buffer('v_cache', torch.zeros(cache_shape, dtype=dtype))
+
+    def update(self, input_pos, k_val, v_val):
+        # input_pos: [S], k_val: [B, H, S, D]
+        assert input_pos.shape[0] == k_val.shape[2]
+
+        k_out = self.k_cache
+        v_out = self.v_cache
+        k_out[:, :, input_pos] = k_val
+        v_out[:, :, input_pos] = v_val
+
+        return k_out, v_out
+
 class Transformer(nn.Module):
     def __init__(self, config: ModelArgs) -> None:
         super().__init__()
@@ -98,16 +142,10 @@ class Transformer(nn.Module):
 
         self.freqs_cis: Optional[Tensor] = None
         self.mask_cache: Optional[Tensor] = None
-        self.max_batch_size = -1
-        self.max_seq_length = -1
 
-    def setup_caches(self, max_batch_size, max_seq_length):
-        if self.max_seq_length >= max_seq_length and self.max_batch_size >= max_batch_size:
-            return
+    def post_init(self):
         head_dim = self.config.dim // self.config.n_head
-        max_seq_length = find_multiple(max_seq_length, 8)
-        self.max_seq_length = max_seq_length
-        self.max_batch_size = max_batch_size
+        self.config.max_seq_length = find_multiple(self.config.max_seq_length, 8)
         dtype = self.output.weight.dtype
         # For quantized layers, dtype is encoded in scales
         if hasattr(self.output, "scales"):
@@ -115,10 +153,10 @@ class Transformer(nn.Module):
         elif hasattr(self.output, "scales_and_zeros"):
             dtype = self.output.scales_and_zeros.dtype
         for b in self.layers:
-            b.attention.kv_cache = KVCache(max_batch_size, max_seq_length, self.config.n_local_heads, head_dim, dtype)
+            b.attention.kv_cache = KVCache(self.config.max_batch_size, self.config.max_seq_length, self.config.n_local_heads, head_dim, dtype)
 
         self.freqs_cis = precompute_freqs_cis(self.config.block_size, self.config.dim // self.config.n_head, self.config.rope_base, dtype)
-        self.causal_mask = torch.tril(torch.ones(self.max_seq_length, self.max_seq_length, dtype=torch.bool))
+        self.causal_mask = torch.tril(torch.ones(self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool))
 
     def forward(self, idx: Tensor, input_pos: Optional[Tensor] = None) -> Tensor:
         assert self.freqs_cis is not None, "Caches must be initialized first"
@@ -136,6 +174,20 @@ class Transformer(nn.Module):
     def from_name(cls, name: str):
         return cls(ModelArgs.from_name(name))
 
+    # load a pretrained model
+    @classmethod
+    def from_pretrained(cls, config: ModelArgs, checkpoint_file, device):
+        # this prevents memory allocation on model creation
+        with torch.device('meta'):
+            model = cls(config)
+        # weights is directly loaded into vram by mmap the weight file
+        checkpoint = torch.load(checkpoint_file, mmap=True, weights_only=True)
+        model.load_state_dict(checkpoint, assign=True)
+        model = model.to(device)
+        with torch.device(device):
+            model.post_init()
+        return model
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: ModelArgs) -> None:
@@ -145,7 +197,7 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
 
-    def forward(self, x: Tensor, input_pos: Tensor, freqs_cis: Tensor, mask: Tensor) -> Tensor:
+    def forward(self, x: Tensor, input_pos: Tensor, freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
         h = x + self.attention(self.attention_norm(x), freqs_cis, mask, input_pos)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
