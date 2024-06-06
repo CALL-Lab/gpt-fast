@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
+import math
 
 
 # The smallest multiple of k that is greater than or equal to n
@@ -36,7 +37,7 @@ class TransformerBlockOutput:
 @dataclass
 class AttentionOutput:
     attention_output: Tensor
-    attention_weights: Optional[Tensor]
+    attention_coefficients: Optional[Tensor]
 
 # Hyperparams of a LLM
 @dataclass
@@ -141,9 +142,9 @@ class Transformer(nn.Module):
         self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
 
         self.freqs_cis: Optional[Tensor] = None
-        self.mask_cache: Optional[Tensor] = None
 
-    def post_init(self):
+    # this need to be invoked after the weights is initialized or loaded
+    def post_init(self) -> None:
         head_dim = self.config.dim // self.config.n_head
         self.config.max_seq_length = find_multiple(self.config.max_seq_length, 8)
         dtype = self.output.weight.dtype
@@ -158,17 +159,39 @@ class Transformer(nn.Module):
         self.freqs_cis = precompute_freqs_cis(self.config.block_size, self.config.dim // self.config.n_head, self.config.rope_base, dtype)
         self.causal_mask = torch.tril(torch.ones(self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool))
 
-    def forward(self, idx: Tensor, input_pos: Optional[Tensor] = None) -> Tensor:
-        assert self.freqs_cis is not None, "Caches must be initialized first"
-        mask = self.causal_mask[None, None, input_pos]
+    def forward(self, idx: Tensor, input_pos: Optional[Tensor] = None) -> TransformerOutput:
+        assert self.freqs_cis is not None, "`post_init()` must be involked first"
+        mask = self.causal_mask[input_pos]
         freqs_cis = self.freqs_cis[input_pos]
         x = self.tok_embeddings(idx)
 
+        hidden_states: Optional[Tuple[Tensor]] = None
+        attentions: Optional[Tuple[Tensor]] = None
+        if self.config.output_hidden_states:
+            hidden_states = tuple()
+        if self.config.output_attentions:
+            attentions = tuple()
+
+        # attention layers
         for i, layer in enumerate(self.layers):
-            x = layer(x, input_pos, freqs_cis, mask)
+            layer_output: TransformerBlockOutput = layer(x, input_pos, freqs_cis, mask)
+            x = layer_output.hidden_state
+            if self.config.output_hidden_states:
+                hidden_states += (layer_output.hidden_state, )
+            if self.config.output_attentions:
+                attentions += (layer_output.attention, )
+
+        # normalization layer
         x = self.norm(x)
+        if self.config.output_hidden_states:
+            hidden_states += (x, )
+
         logits = self.output(x)
-        return logits
+        return TransformerOutput(
+            logits=logits,
+            hidden_states=hidden_states,
+            attentions=attentions
+        )
 
     @classmethod
     def from_name(cls, name: str):
@@ -198,9 +221,13 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
 
     def forward(self, x: Tensor, input_pos: Tensor, freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
-        h = x + self.attention(self.attention_norm(x), freqs_cis, mask, input_pos)
+        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, input_pos)
+        h = x + attention_output.attention_output
         out = h + self.feed_forward(self.ffn_norm(h))
-        return out
+        return TransformerBlockOutput(
+            hidden_state=out,
+            attention=attention_output.attention_coefficients
+        )
 
 
 class Attention(nn.Module):
@@ -214,10 +241,7 @@ class Attention(nn.Module):
         self.wo = nn.Linear(config.dim, config.dim, bias=False)
         self.kv_cache = None
 
-        self.n_head = config.n_head
-        self.head_dim = config.head_dim
-        self.n_local_heads = config.n_local_heads
-        self.dim = config.dim
+        self.config: ModelArgs = config
         self._register_load_state_dict_pre_hook(self.load_hook)
 
     def load_hook(self, state_dict, prefix, *args):
@@ -227,15 +251,15 @@ class Attention(nn.Module):
             wv = state_dict.pop(prefix + "wv.weight")
             state_dict[prefix + "wqkv.weight"] = torch.cat([wq, wk, wv])
 
-    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, input_pos: Optional[Tensor] = None) -> Tensor:
+    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, input_pos: Optional[Tensor] = None) -> AttentionOutput:
         bsz, seqlen, _ = x.shape
 
-        kv_size = self.n_local_heads * self.head_dim
-        q, k, v = self.wqkv(x).split([self.dim, kv_size, kv_size], dim=-1)
+        kv_size = self.config.n_local_heads * self.config.head_dim
+        q, k, v = self.wqkv(x).split([self.config.dim, kv_size, kv_size], dim=-1)
 
-        q = q.view(bsz, seqlen, self.n_head, self.head_dim)
-        k = k.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        v = v.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        q = q.view(bsz, seqlen, self.config.n_head, self.config.head_dim)
+        k = k.view(bsz, seqlen, self.config.n_local_heads, self.config.head_dim)
+        v = v.view(bsz, seqlen, self.config.n_local_heads, self.config.head_dim)
 
         q = apply_rotary_emb(q, freqs_cis)
         k = apply_rotary_emb(k, freqs_cis)
@@ -245,14 +269,17 @@ class Attention(nn.Module):
         if self.kv_cache is not None:
             k, v = self.kv_cache.update(input_pos, k, v)
 
-        k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
-        v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+        k = k.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
+        v = v.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
+        y, attn_weight = scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
-        y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
+        y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.config.dim)
 
         y = self.wo(y)
-        return y
+        return AttentionOutput(
+            attention_output=y,
+            attention_coefficients=attn_weight if self.config.output_attentions else None
+        )
 
 
 class FeedForward(nn.Module):
@@ -305,3 +332,28 @@ def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
 
     x_out2 = x_out2.flatten(3)
     return x_out2.type_as(x)
+
+# An alternative implementation of `torch.nn.functions.scaled_dot_product_attention`
+# that outputs the attention weights.
+def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_mask:Optional[Tensor]=None, dropout_p:float=0.0, is_causal:bool=False, scale:float=None) -> Tuple[Tensor]:
+    device = query.device
+    L, S = query.size(-2), key.size(-2)
+    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=device)
+    if is_causal:
+        assert attn_mask is None
+        temp_mask = torch.ones(L, S, dtype=torch.bool, device=device).tril(diagonal=0)
+        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        attn_bias.to(query.dtype)
+
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+        else:
+            attn_bias += attn_mask
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+    attn_weight += attn_bias
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+    attn_output = attn_weight @ value
+    return attn_output, attn_weight
