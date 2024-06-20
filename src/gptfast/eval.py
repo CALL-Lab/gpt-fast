@@ -20,7 +20,7 @@ torch._dynamo.config.cache_size_limit = 100000
 
 from tokenizer import get_tokenizer
 
-from model import Transformer
+from .model import Transformer
 
 try:
     import lm_eval
@@ -28,7 +28,7 @@ try:
 except:
     lm_eval_available = False
 
-from generate import _load_model, encode_tokens, model_forward
+from .generate import _load_model, encode_tokens, model_forward
 
 if lm_eval_available:
     try: # lm_eval version 0.4

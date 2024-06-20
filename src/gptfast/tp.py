@@ -15,8 +15,8 @@ else:
     # Distributed is not supported on MacOS
     funcol = None
 
-from model import Attention, FeedForward, Transformer
-from quantize import WeightOnlyInt4Linear
+from .model import Attention, FeedForward, Transformer
+from .quantize import WeightOnlyInt4Linear
 
 
 def _get_rank() -> int:

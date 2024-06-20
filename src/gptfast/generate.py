@@ -32,8 +32,8 @@ default_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from model import Transformer
-from tokenizer import get_tokenizer
+from .model import Transformer
+from .tokenizer import get_tokenizer
 
 def multinomial_sample_one_no_sync(probs_sort): # Does multinomial sampling without a cuda synchronization
     q = torch.empty_like(probs_sort).exponential_(1)
@@ -56,13 +56,13 @@ def sample(logits, temperature: float = 1.0, top_k: Optional[int] = None):
 
 def prefill(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor, **sampling_kwargs) -> torch.Tensor:
     # input_pos: [B, S]
-    logits = model(x, input_pos)
+    logits = model(x, input_pos).logits
     return sample(logits, **sampling_kwargs)[0]
 
 def decode_one_token(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor, **sampling_kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
     # input_pos: [B, 1]
     assert input_pos.shape[-1] == 1
-    logits = model(x, input_pos)
+    logits = model(x, input_pos).logits
     return sample(logits, **sampling_kwargs)
 
 def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int, callback=lambda _: _, **sampling_kwargs):
@@ -82,7 +82,7 @@ def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torc
 
 
 def model_forward(model, x, input_pos):
-    return model(x, input_pos)
+    return model(x, input_pos).logits
 
 def speculative_decode(
     model: Transformer,
@@ -140,8 +140,8 @@ def generate(
     prompt: torch.Tensor,
     max_new_tokens: int,
     *,
-    interactive: bool,
-    draft_model: Transformer,
+    interactive: bool = False,
+    draft_model: Optional[Transformer] = None,
     speculate_k: Optional[int] = 8,
     callback = lambda x: x,
     **sampling_kwargs
@@ -162,9 +162,9 @@ def generate(
     device, dtype = prompt.device, prompt.dtype
     max_seq_length = max_seq_length + speculate_k + 1 if is_speculative else max_seq_length
     with torch.device(device):
-        model.setup_caches(max_batch_size=1, max_seq_length=max_seq_length)
+        model.post_init(max_batch_size=1, max_seq_length=max_seq_length)
         if is_speculative and draft_model is not model:
-            draft_model.setup_caches(max_batch_size=1, max_seq_length=max_seq_length)
+            draft_model.post_init(max_batch_size=1, max_seq_length=max_seq_length)
 
     # create an empty tensor of the expected final shape and fill in the current tokens
     empty = torch.empty(T_new, dtype=dtype, device=device)
@@ -218,7 +218,7 @@ def _load_model(checkpoint_path, device, precision, use_tp):
 
     if "int8" in str(checkpoint_path):
         print("Using int8 weight-only quantization!")
-        from quantize import WeightOnlyInt8QuantHandler
+        from .quantize import WeightOnlyInt8QuantHandler
         simple_quantizer = WeightOnlyInt8QuantHandler(model)
         model = simple_quantizer.convert_for_runtime()
 
@@ -226,7 +226,7 @@ def _load_model(checkpoint_path, device, precision, use_tp):
         print("Using int4 weight-only quantization!")
         path_comps = checkpoint_path.name.split(".")
         groupsize = int(path_comps[-2][1:])
-        from quantize import WeightOnlyInt4QuantHandler
+        from .quantize import WeightOnlyInt4QuantHandler
         simple_quantizer = WeightOnlyInt4QuantHandler(model, groupsize)
         model = simple_quantizer.convert_for_runtime()
 
@@ -236,7 +236,7 @@ def _load_model(checkpoint_path, device, precision, use_tp):
     model.load_state_dict(checkpoint, assign=True)
 
     if use_tp:
-        from tp import apply_tp
+        from .tp import apply_tp
         print("Applying tensor parallel to model ...")
         apply_tp(model)
 
@@ -280,7 +280,7 @@ def main(
     assert tokenizer_path.is_file(), str(tokenizer_path)
 
     global print
-    from tp import maybe_init_dist
+    from .tp import maybe_init_dist
     rank = maybe_init_dist()
     use_tp = rank is not None
     if use_tp:

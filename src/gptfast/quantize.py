@@ -9,15 +9,15 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tokenizer import get_tokenizer
+from .tokenizer import get_tokenizer
 
 try:
-    from GPTQ import GenericGPTQRunner, InputRecorder
-    from eval import get_task_dict, evaluate, lm_eval
+    from .GPTQ import GenericGPTQRunner, InputRecorder
+    from .eval import get_task_dict, evaluate, lm_eval
 except:
     pass
 
-from model import Transformer
+from .model import Transformer
 
 ##### Quantization Primitives ######
 
@@ -421,7 +421,7 @@ class WeightOnlyInt4QuantHandler:
                 weight = mod.weight.data
                 if not _check_linear_int4_k(in_features, self.groupsize, self.inner_k_tiles):
                     if self.padding:
-                        from model import find_multiple
+                        from .model import find_multiple
                         import torch.nn.functional as F
                         print(f"warning: {fqn} is padded to satisfy in_features % 1024 == 0")
                         padded_in_features = find_multiple(in_features, 1024)
@@ -444,7 +444,7 @@ class WeightOnlyInt4QuantHandler:
 
 class WeightOnlyInt4GPTQQuantHandler(GPTQQuantHandler):
     def __init__(self, mod, groupsize=128, inner_k_tiles=8, padding=True):
-        from model import find_multiple
+        from .model import find_multiple
         self.mod = mod
         self.groupsize = groupsize
         self.inner_k_tiles = inner_k_tiles
@@ -493,7 +493,7 @@ class WeightOnlyInt4Linear(torch.nn.Module):
         super().__init__()
         self.padding = padding
         if padding:
-            from model import find_multiple
+            from .model import find_multiple
             self.origin_in_features = in_features
             in_features = find_multiple(in_features, 1024)
 

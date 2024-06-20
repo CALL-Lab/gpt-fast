@@ -13,7 +13,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 
 aten = torch.ops.aten
 
-from eval import (
+from .eval import (
     setup_cache_padded_seq_input_pos_max_seq_length_for_prefill,
     GPTFastEvalWrapper
 )

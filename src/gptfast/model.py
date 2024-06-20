@@ -147,7 +147,15 @@ class Transformer(nn.Module):
         self.freqs_cis: Optional[Tensor] = None
 
     # this need to be invoked after the weights is initialized or loaded
-    def post_init(self) -> None:
+    def post_init(self, max_seq_length:Optional[int]=None, max_batch_size:Optional[int]=None) -> None:
+        # You can change the maximum sequence length and batch size by rerunning `post_init`
+        # This will reset the positional embedding cache and KV cache
+        if max_seq_length is not None:
+            self.config.max_seq_length = max_seq_length
+        if max_batch_size is not None:
+            self.config.max_batch_size = max_batch_size
+
+        # Initialize the KV cache
         head_dim = self.config.dim // self.config.n_head
         self.config.max_seq_length = find_multiple(self.config.max_seq_length, 8)
         dtype = self.output.weight.dtype
@@ -159,6 +167,7 @@ class Transformer(nn.Module):
         for b in self.layers:
             b.attention.kv_cache = KVCache(self.config.max_batch_size, self.config.max_seq_length, self.config.n_local_heads, head_dim, dtype)
 
+        # Initialize the positional embedding cache
         self.freqs_cis = precompute_freqs_cis(self.config.block_size, self.config.dim // self.config.n_head, self.config.rope_base, dtype)
         self.causal_mask = torch.tril(torch.ones(self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool))
 
