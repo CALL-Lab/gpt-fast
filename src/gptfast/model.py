@@ -135,13 +135,15 @@ class KVCache(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, config: ModelArgs) -> None:
         super().__init__()
-        self.config = config
+        self.config: ModelArgs = config
 
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
-        self.layers = nn.ModuleList(TransformerBlock(config) for _ in range(config.n_layer))
-        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
+        # layers
+        self.tok_embeddings: nn.Embedding = nn.Embedding(config.vocab_size, config.dim)
+        self.layers: nn.ModuleList = nn.ModuleList(TransformerBlock(config) for _ in range(config.n_layer))
+        self.norm: nn.Module = RMSNorm(config.dim, eps=config.norm_eps)
+        self.output: nn.Module = nn.Linear(config.dim, config.vocab_size, bias=False)
 
+        # positional embedding cache
         self.freqs_cis: Optional[Tensor] = None
 
     # this need to be invoked after the weights is initialized or loaded
@@ -160,11 +162,18 @@ class Transformer(nn.Module):
         self.freqs_cis = precompute_freqs_cis(self.config.block_size, self.config.dim // self.config.n_head, self.config.rope_base, dtype)
         self.causal_mask = torch.tril(torch.ones(self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool))
 
-    def forward(self, idx: Tensor, input_pos: Optional[Tensor] = None) -> TransformerOutput:
+    def forward(self, tokens: Tensor, input_pos: Optional[Tensor] = None) -> TransformerOutput:
         assert self.freqs_cis is not None, "`post_init()` must be involked first"
         mask = self.causal_mask[input_pos]
         freqs_cis = self.freqs_cis[input_pos]
-        x = self.tok_embeddings(idx)
+        # if `tokens` is a 2D tensor, we treat it as a batch of token ids
+        # if `tokens` is a 3D tensor, we treat it as a batch of word vectors
+        assert len(tokens.shape)==2 or (len(tokens.shape)==3 and tokens.shape[-1]==self.config.dim), "invalid input shape"
+        # if `tokens` is token ids, we need to convert it into word vectors first
+        if len(tokens.shape) == 2:
+            x = self.tok_embeddings(tokens)
+        elif len(tokens.shape) == 3:
+            x = tokens
 
         hidden_states: Optional[Tuple[Tensor]] = None
         attentions: Optional[Tuple[Tensor]] = None
@@ -187,6 +196,7 @@ class Transformer(nn.Module):
         if self.config.output_hidden_states:
             hidden_states += (x, )
 
+        # output layer
         logits: Optional[Tensor] = None
         if self.config.output_logits:
             logits = self.output(x)

@@ -22,7 +22,7 @@ This library supports `sentencepiece` and `tiktoken` tokenizers. A wrapper class
 
 Use `TokenizerInterface.encode(text)` to encode a text into token ids and `TokenizerInterface.decode(text)` to decode token ids into a text.
 
-Predict the next token with `model(input_ids, input_pos)` where `model` is an instance of Transformer, and `input_ids` is a sequence of token ids. The length of the input sequence should be less than or equal to the maximum length specified in the config.
+Predict the next token with `model(tokens, input_pos)` where `model` is an instance of Transformer, and `tokens` is a batch of token id sequence or a batch of word vector sequence. If `tokens` is a 2D tensor, it's treated as a batch of token ids, and if `tokens` is a 3D tensor, its treated as a batch of word vectors. The length of the input sequence should be less than or equal to the maximum length specified in the config.
 
 The output of the model is a `TransformerOutput` object, which contains the logits of the next token, and optionally the hidden states of each layer (the outputs of each attention layers followed by the output of the normalization layer) and the attention coefficient of each attention layer. To make the model output the hidden states and attention coefficients, you need to specify `output_hidden_states=True` and `output_attentions=True` in the model config when initializing the model. If you are not interested in the logits, you can specify `output_logits=False` to prevent the model from computing the logits.
 
