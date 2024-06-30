@@ -23,7 +23,7 @@ def find_multiple(n: int, k: int) -> int:
 # including the logits and intermediate variables
 @dataclass
 class TransformerOutput:
-    logits: Tensor
+    logits: Optional[Tensor]
     hidden_states: Optional[Tuple[Tensor]]
     attentions: Optional[Tuple[Tensor]]
 
@@ -54,6 +54,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     max_batch_size: int = 1
     max_seq_length: int = 128
+    output_logits:bool = True
     output_hidden_states:bool = False
     output_attentions:bool = False
 
@@ -168,7 +169,10 @@ class Transformer(nn.Module):
         if self.config.output_hidden_states:
             hidden_states += (x, )
 
-        logits = self.output(x)
+        logits: Optional[Tensor] = None
+        if self.config.output_logits:
+            logits = self.output(x)
+
         return TransformerOutput(
             logits=logits,
             hidden_states=hidden_states,
