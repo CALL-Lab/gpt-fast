@@ -177,7 +177,7 @@ class compressor_Transformer(nn.Module):
         return f'compressor_Transformer attached to model {self.config.compressor_attach_name}'
 
 
-class compressor(nn.Module):
+class Compressor(nn.Module):
     def __init__(self, attached_model_name: str = "Llama-3-8B") -> None:
         super().__init__()
         config = ModelArgs(n_layer=8, n_head=8,compressor_architecture='seq2one-e', compressor_attach_name=attached_model_name)
@@ -186,8 +186,9 @@ class compressor(nn.Module):
                                  model_dict_key = 'tok_embeddings.weight')
         print(f"Initiate compressor_model finished, size {_get_model_size(compress_model)}")
     
-    def compressor_train(compress_dataset,):    
+    def compressor_train(self, compress_dataset):
+        pass
     
-    def compress_to_one_Token(tokenizer, prompt):
+    def compress_to_one_token(self, tokenizer, prompt):
         encoded = encode_tokens(tokenizer, prompt, bos=True, device=self.device)
         prompt_length = encoded.size(0)
