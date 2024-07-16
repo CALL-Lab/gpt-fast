@@ -65,6 +65,7 @@ class ModelArgs:
             hidden_dim = 4 * self.dim
             n_hidden = int(2 * hidden_dim / 3)
             self.intermediate_size = find_multiple(n_hidden, 256)
+        assert self.dim % self.n_head == 0, "dim({}) has no aliquot with value n_head({})".format(self.dim, self.n_head)
         self.head_dim = self.dim // self.n_head
 
     @classmethod
@@ -146,7 +147,6 @@ class Transformer(nn.Module):
         assert self.freqs_cis is not None, "`post_init()` must be involked first"
         mask = self.causal_mask[input_pos]
         freqs_cis = self.freqs_cis[input_pos]
-        x = self.tok_embeddings(idx)
 
         hidden_states: Optional[Tuple[Tensor]] = None
         attentions: Optional[Tuple[Tensor]] = None
@@ -155,6 +155,7 @@ class Transformer(nn.Module):
         if self.config.output_attentions:
             attentions = tuple()
 
+        x = self.tok_embeddings(idx)
         # attention layers
         for i, layer in enumerate(self.layers):
             layer_output: TransformerBlockOutput = layer(x, input_pos, freqs_cis, mask)
