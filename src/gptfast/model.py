@@ -4,7 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -104,8 +104,8 @@ class KVCache(nn.Module):
         self.register_buffer('k_cache', torch.zeros(cache_shape, dtype=dtype))
         self.register_buffer('v_cache', torch.zeros(cache_shape, dtype=dtype))
 
-    def update(self, input_pos, k_val, v_val):
-        # input_pos: [S], k_val: [B, H, S, D]
+    def update(self, input_poses, k_val, v_val):
+        # input_pos: List[S], k_val: [B, H, S, D]
         assert input_pos.shape[0] == k_val.shape[2]
 
         k_out = self.k_cache
@@ -137,16 +137,24 @@ class Transformer(nn.Module):
             dtype = self.output.scales.dtype
         elif hasattr(self.output, "scales_and_zeros"):
             dtype = self.output.scales_and_zeros.dtype
-        for b in self.layers:
-            b.attention.kv_cache = KVCache(self.config.max_batch_size, self.config.max_seq_length, self.config.n_local_heads, head_dim, dtype)
+        # for b in self.layers:
+        #     b.attention.kv_cache = KVCache(self.config.max_batch_size, self.config.max_seq_length, self.config.n_local_heads, head_dim, dtype)
 
         self.freqs_cis = precompute_freqs_cis(self.config.block_size, self.config.dim // self.config.n_head, self.config.rope_base, dtype)
+        self.freqs_cis_batch = self.freqs_cis[0:self.config.max_seq_length]
         self.causal_mask = torch.tril(torch.ones(self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool))
 
-    def forward(self, idx: Tensor, input_pos: Optional[Tensor] = None) -> TransformerOutput:
-        assert self.freqs_cis is not None, "`post_init()` must be involked first"
-        mask = self.causal_mask[input_pos]
-        freqs_cis = self.freqs_cis[input_pos]
+    def forward(self, idx: Tensor, input_poses: List[Tensor] = None) -> TransformerOutput: # idx: [B,S] ; input_poses: List(arange(seq_length)) with batch length
+        assert self.freqs_cis is not None, "`post_init()` must be involked first."
+        # assert idx.shape == input_poses.shape, "idx and input_poses should have the same shape."
+        assert idx.size(1) ==  self.config.max_seq_length, "Input sequence length should be equal to max_seq_length in batch inference."
+        masks = torch.zeros(idx.size(0), self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool)
+        for seq_id in torch.arange(len(input_poses)):
+            mask = self.causal_mask.clone()
+            mask[ : , 0: (self.config.max_seq_length - input_poses[seq_id][-1] - 1)] = 0 # Left padding mask
+            masks[seq_id] = mask.type(torch.bool)
+        # masks = torch.stack(masks).type(torch.bool)
+        freqs_cis = self.freqs_cis_batch
 
         hidden_states: Optional[Tuple[Tensor]] = None
         attentions: Optional[Tuple[Tensor]] = None
@@ -158,7 +166,7 @@ class Transformer(nn.Module):
         x = self.tok_embeddings(idx)
         # attention layers
         for i, layer in enumerate(self.layers):
-            layer_output: TransformerBlockOutput = layer(x, input_pos, freqs_cis, mask)
+            layer_output: TransformerBlockOutput = layer(x, input_poses, freqs_cis, mask)
             x = layer_output.hidden_state
             if self.config.output_hidden_states:
                 hidden_states += (layer_output.hidden_state, )
@@ -207,8 +215,8 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
 
-    def forward(self, x: Tensor, input_pos: Tensor, freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
-        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, input_pos)
+    def forward(self, x: Tensor, input_poses: List[Tensor], freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
+        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, input_poses)
         h = x + attention_output.attention_output
         out = h + self.feed_forward(self.ffn_norm(h))
         return TransformerBlockOutput(
@@ -238,7 +246,7 @@ class Attention(nn.Module):
             wv = state_dict.pop(prefix + "wv.weight")
             state_dict[prefix + "wqkv.weight"] = torch.cat([wq, wk, wv])
 
-    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, input_pos: Optional[Tensor] = None) -> AttentionOutput:
+    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, input_poses: List[Tensor] = None) -> AttentionOutput:
         bsz, seqlen, _ = x.shape
 
         kv_size = self.config.n_local_heads * self.config.head_dim
@@ -253,8 +261,8 @@ class Attention(nn.Module):
 
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
 
-        if self.kv_cache is not None:
-            k, v = self.kv_cache.update(input_pos, k, v)
+        # if self.kv_cache is not None:
+        #     k, v = self.kv_cache.update(input_pos, k, v)
 
         k = k.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
         v = v.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
@@ -327,17 +335,17 @@ def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_ma
     L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
     attn_bias = torch.zeros(L, S, dtype=query.dtype, device=device)
-    if is_causal:
-        assert attn_mask is None
-        temp_mask = torch.ones(L, S, dtype=torch.bool, device=device).tril(diagonal=0)
-        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-        attn_bias.to(query.dtype)
+    # if is_causal:
+    #     assert attn_mask is None
+    #     temp_mask = torch.ones(L, S, dtype=torch.bool, device=device).tril(diagonal=0)
+    #     attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+    #     attn_bias.to(query.dtype)
 
     if attn_mask is not None:
         if attn_mask.dtype == torch.bool:
             attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
         else:
-            attn_bias += attn_mask
+            attn_mask.type(torch.bool).masked_fill_(attn_mask.logical_not(), float("-inf"))
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
     attn_weight += attn_bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
