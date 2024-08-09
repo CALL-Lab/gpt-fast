@@ -144,15 +144,28 @@ class Transformer(nn.Module):
         self.freqs_cis_batch = self.freqs_cis[0:self.config.max_seq_length]
         self.causal_mask = torch.tril(torch.ones(self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool))
 
-    def forward(self, idx: Tensor, input_poses: List[Tensor] = None) -> TransformerOutput: # idx: [B,S] ; input_poses: List(arange(seq_length)) with batch length
+    def forward(self, idx: Tensor, seq_lens: Tensor = None, tok_level_pad_mask: bool = False) -> TransformerOutput: # idx: [B,S] ; input_poses: List(arange(seq_length)) with batch length
+        '''
+        Args:
+            idx (Tensor): The input tensor of shape [B, S] where B is the batch size and S is the sequence length.
+            seq_lens (Tensor): The tensor  of shape [S] containing the lengths of the input sequences.
+            tok_level_pad_mask (bool, optional): Whether to apply token-level padding mask, which does not affect the attention pad mask. Defaults to False.
+        Returns:
+            output(TransformerOutput): The output of the transformer model, including logits, hidden states, and attentions.
+        '''
         assert self.freqs_cis is not None, "`post_init()` must be involked first."
         # assert idx.shape == input_poses.shape, "idx and input_poses should have the same shape."
         assert idx.size(1) ==  self.config.max_seq_length, "Input sequence length should be equal to max_seq_length in batch inference."
-        masks = torch.zeros(idx.size(0), self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool)
-        for seq_id in torch.arange(len(input_poses)):
+        masks = torch.zeros(idx.size(0), self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool).to(self.causal_mask.device)
+        if tok_level_pad_mask:
+            tok_masks = torch.zeros(idx.size(0), self.config.max_seq_length).to(self.causal_mask.device) # non-bool mask
+        for seq_id in torch.arange(len(seq_lens)):
             mask = self.causal_mask.clone()
-            mask[ : , 0: (self.config.max_seq_length - input_poses[seq_id][-1] - 1)] = 0 # Left padding mask
+            mask[ : , 0: (self.config.max_seq_length - seq_lens[seq_id])] = False # Left padding mask
             masks[seq_id] = mask.type(torch.bool)
+            if tok_level_pad_mask:
+                tok_masks[seq_id][ - seq_lens[seq_id] : ] = 1 # seq token mask set true
+        
         # masks = torch.stack(masks).type(torch.bool)
         freqs_cis = self.freqs_cis_batch
 
@@ -164,9 +177,11 @@ class Transformer(nn.Module):
             attentions = tuple()
 
         x = self.tok_embeddings(idx)
+        if tok_level_pad_mask:
+            x = tok_masks.type(x.dtype).unsqueeze(-1) * x
         # attention layers
         for i, layer in enumerate(self.layers):
-            layer_output: TransformerBlockOutput = layer(x, input_poses, freqs_cis, mask)
+            layer_output: TransformerBlockOutput = layer(x, seq_lens, freqs_cis, mask)
             x = layer_output.hidden_state
             if self.config.output_hidden_states:
                 hidden_states += (layer_output.hidden_state, )
@@ -215,8 +230,8 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
 
-    def forward(self, x: Tensor, input_poses: List[Tensor], freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
-        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, input_poses)
+    def forward(self, x: Tensor, seq_lens: Tensor, freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
+        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, seq_lens)
         h = x + attention_output.attention_output
         out = h + self.feed_forward(self.ffn_norm(h))
         return TransformerBlockOutput(
@@ -246,7 +261,7 @@ class Attention(nn.Module):
             wv = state_dict.pop(prefix + "wv.weight")
             state_dict[prefix + "wqkv.weight"] = torch.cat([wq, wk, wv])
 
-    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, input_poses: List[Tensor] = None) -> AttentionOutput:
+    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, seq_lens: Tensor = None) -> AttentionOutput:
         bsz, seqlen, _ = x.shape
 
         kv_size = self.config.n_local_heads * self.config.head_dim
@@ -262,7 +277,7 @@ class Attention(nn.Module):
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
 
         # if self.kv_cache is not None:
-        #     k, v = self.kv_cache.update(input_pos, k, v)
+        #     k, v = self.kv_cache.update[torch.arange(seq_len).to(device) for seq_len in seq_lens], k, v)
 
         k = k.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
         v = v.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
@@ -349,6 +364,7 @@ def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_ma
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
     attn_weight += attn_bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
+    attn_weight = torch.nan_to_num(attn_weight, nan=0.0)
     attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
     attn_output = attn_weight @ value
     return attn_output, attn_weight
