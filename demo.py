@@ -69,5 +69,23 @@ When 'tok_level_pad_mask' is switched off, the padding token is only masked out 
 in attention map (to -inf). The output of the mode model is as follows \
 (the padding token is clamped out):
 
-['. check fox', '. look fox jumps']
+['_{ look fox jumps', '. look fox jumps']
+
+The phenomenon is interesting because the padding token is not totally masked \
+out when 'tok_level_pad_mask' is switched off, as the residual constrction will \
+keep the original embedding of the token and go to the next layer transformerBlock,\
+and keep it until the full-connect output layer, code is here:
+
+class TransformerBlock(nn.Module):
+    ...
+    def forward(self, x: Tensor, seq_lens: Tensor, freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
+        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, seq_lens)
+        h = x + attention_output.attention_output
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return TransformerBlockOutput(
+            hidden_state=out,
+            attention=attention_output.attention_coefficients
+        )
+
+Hope you to check out here and find out the reason.
 '''
