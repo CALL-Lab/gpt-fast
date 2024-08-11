@@ -1,7 +1,9 @@
 import src.gptfast.model as gptFast
+from src.gptfast.model import TransformerOutput
 import src.gptfast.tokenizer as gptFastTokenizer
 import torch
 import numpy as np
+from typing import Optional, Tuple, List
 
 
 def extract_attn_map(outputs, layer_idx=0, compress_idx=None):
@@ -18,6 +20,28 @@ def extract_attn_map(outputs, layer_idx=0, compress_idx=None):
     compress_attn = attn[:,:,compress_idx,:]
     attn_map = compress_attn[:,:,:,non_compress_idx]
     return attn_map
+
+def extract_hidden_states(outputs: TransformerOutput, compress_idxes_lst: List[List[int]], seq_len_lst: List[int], layer_idx=32, pad_mode='left'):
+    '''
+    compress_idx(list[list[int]]): [seq_id: [token_id: num_compressed_tokens]]
+    seq_len_lst(list[int]): [seq: seq_len]
+    '''
+    assert len(compress_idxes_lst) == len(seq_len_lst), "The length of compress_idx_lst and seq_len_lst should be the same."
+    assert pad_mode == 'left', "The pad_mode should be 'left'."
+    
+    batch_hidden_state = outputs.hidden_states[layer_idx]# shape is (batch_size, num_heads, seq_len, max_seq_len)
+    bsz, max_seq_len, hidden_dim = batch_hidden_state.shape
+    extracted_hidden_states = []
+    for seq_id in range(len(compress_idxes_lst)):
+        cur_uncompressed_idxs = torch.tensor([i for i in torch.arange(seq_len_lst[seq_id]) \
+                                            if i not in compress_idxes_lst[seq_id]])
+        cur_uncompressed_neg_ids = cur_uncompressed_idxs - seq_len_lst[seq_id]
+        cur_attn_proj_hidden_state = batch_hidden_state[seq_id, cur_uncompressed_neg_ids, :]
+        extracted_hidden_states.append(cur_attn_proj_hidden_state)
+    
+    assert len(extracted_hidden_states) == len(seq_len_lst), "The seqs number of extracted_hidden_states and seq_len_lst should be the same."
+    return extracted_hidden_states
+    
 
 def simp_lst_pad(encoded_pad, max_seq_length, origin_seq, mode='left'): # mode='left' or 'right'
     if mode == 'left':
@@ -47,8 +71,10 @@ for seq_id in range(len(token_lst)):
     token_lst[seq_id] = simp_lst_pad(encoded_pad, max_seq_length, token_lst[seq_id])
 tokens = np.array(token_lst)
 print(tokens)
-outputs = model.forward(torch.tensor(tokens).to(device), torch.tensor(np.array(len_lst)).to(device), tok_level_pad_mask=False) # [torch.arange(seq_len).to(device) for seq_len in len_lst]
-compress_attn = extract_attn_map(outputs, layer_idx=0, compress_idx=torch.tensor([2,3]))
+outputs = model.forward(torch.tensor(tokens).to(device), torch.tensor(np.array(len_lst)).to(device), tok_level_pad_mask=True) # [torch.arange(seq_len).to(device) for seq_len in len_lst]
+# compress_attn = extract_attn_map(outputs, layer_idx=0, compress_idx=torch.tensor([2,3]))
+compress_hidden_states = extract_hidden_states(outputs, compress_idxes_lst=[[2,3], [2,]], seq_len_lst=[4, 5], layer_idx=32, pad_mode='left')
+print(compress_hidden_states)
 # print(outputs.hidden_states)
 # print(outputs.attentions)
 pred = torch.argmax(outputs.logits, dim=2)
