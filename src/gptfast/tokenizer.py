@@ -32,6 +32,14 @@ class TokenizerInterface:
                 if len(ids) < max_len:
                     token_ids[i] = [padding] * (max_len - len(ids)) + ids
         return token_ids
+    
+    def batch_padding(self, token_ids: List[List[int]], padding: int, max_len = None) -> List[List[int]]:
+        if max_len is None:
+            max_len = max(len(ids) for ids in token_ids)
+        for i, ids in enumerate(token_ids):
+            if len(ids) < max_len:
+                token_ids[i] = [padding] * (max_len - len(ids)) + ids
+        return token_ids
 
 class SentencePieceWrapper(TokenizerInterface):
     def __init__(self, model_path):
