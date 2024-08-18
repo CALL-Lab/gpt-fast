@@ -11,7 +11,12 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
 import math
+import sys
+from pathlib import Path
 
+wd = Path(__file__).parent.parent.parent.resolve()
+sys.path.append(str(wd))
+from src.gptfast.model import TransformerOutput, TransformerBlockOutput, AttentionOutput, ModelArgs
 
 # The smallest multiple of k that is greater than or equal to n
 def find_multiple(n: int, k: int) -> int:
@@ -96,7 +101,7 @@ transformer_configs = {
     "stories15M": dict(n_layer=6, n_head=6, dim=288),
     "stories110M": dict(n_layer=12, n_head=12, dim=768),
     "Llama-3-8B": dict(block_size=8192, n_layer=32, n_head=32, n_local_heads=8, dim=4096, intermediate_size=14336, vocab_size=128256),
-    "compressor": dict(block_size=1024, n_layer=8, n_head=8, n_local_heads=4, dim=4096, intermediate_size=1024, vocab_size=128256),
+    "compressor": dict(block_size=1024, n_layer=8, n_head=8, n_local_heads=4, dim=1024, intermediate_size=1024, vocab_size=128256, compressed_tokens_num = 1),
 }
 
 class KVCache(nn.Module):
@@ -117,7 +122,7 @@ class KVCache(nn.Module):
 
         return k_out, v_out
 
-class Transformer(nn.Module):
+class compress_Transformer(nn.Module):
     def __init__(self, config: ModelArgs) -> None:
         super().__init__()
         self.config = config
