@@ -220,6 +220,14 @@ class Transformer(nn.Module):
         with torch.device(device):
             model.post_init()
         return model
+    
+    @classmethod
+    def creat_instance(cls, config: ModelArgs, device):
+        # this prevents memory allocation on model creation
+        with torch.device(device):
+            model = cls(config)
+            model.post_init()
+        return model
 
 
 class TransformerBlock(nn.Module):
