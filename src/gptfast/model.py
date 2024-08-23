@@ -57,6 +57,8 @@ class ModelArgs:
     output_logits:bool = True
     output_hidden_states:bool = False
     output_attentions:bool = False
+    compressed_tokens_num:int = 1
+    compressor_attach_name:str = "Llama-3-8B"
 
     def __post_init__(self):
         if self.n_local_heads == -1:
@@ -144,12 +146,15 @@ class Transformer(nn.Module):
         self.freqs_cis_batch = self.freqs_cis[0:self.config.max_seq_length]
         self.causal_mask = torch.tril(torch.ones(self.config.max_seq_length, self.config.max_seq_length, dtype=torch.bool))
 
-    def forward(self, idx: Tensor, seq_lens: Tensor = None, tok_level_pad_mask: bool = False) -> TransformerOutput: # idx: [B,S] ; input_poses: List(arange(seq_length)) with batch length
+    def forward(self, idx: Tensor, seq_lens: Tensor = None, tok_level_pad_mask: bool = False, compression_eval: bool = False, compressed_tokens: Tensor = None, drop_out_p: float=0) -> TransformerOutput: # idx: [B,S] ; input_poses: List(arange(seq_length)) with batch length
         '''
         Args:
             idx (Tensor): The input tensor of shape [B, S] where B is the batch size and S is the sequence length.
-            seq_lens (Tensor): The tensor  of shape [S] containing the lengths of the input sequences.
+            seq_lens (Tensor): The tensor  of shape [B] containing the lengths of the input sequences. 
+                               When compression_eval is True, seq_lens is the single compressed token appended sequence length.
             tok_level_pad_mask (bool, optional): Whether to apply token-level padding mask, which does not affect the attention pad mask. Defaults to False.
+            compression_eval (bool, optional): Whether to evaluate with compressed token appended. Defaults to False.
+            compressed_token (Tensor, optional): The compressed token, tensor of shape [D]. Defaults to None.
         Returns:
             output(TransformerOutput): The output of the transformer model, including logits, hidden states, and attentions.
         '''
@@ -176,12 +181,19 @@ class Transformer(nn.Module):
         if self.config.output_attentions:
             attentions = tuple()
 
-        x = self.tok_embeddings(idx)
+        x = self.tok_embeddings(idx) # [B, S, D]
+        # append compressed token for evaluation
+        if compression_eval:
+            assert compressed_tokens is not None, "compressed_token should not be None."
+            assert compressed_tokens.shape[0] == x.shape[0], "compressed_token should have the same batch size with input."
+            for i in torch.arange(seq_lens.shape[0]): 
+                x[i, -seq_lens[i], :] = compressed_tokens[i]
+        
         if tok_level_pad_mask:
             x = tok_masks.type(x.dtype).unsqueeze(-1) * x
         # attention layers
         for i, layer in enumerate(self.layers):
-            layer_output: TransformerBlockOutput = layer(x, seq_lens, freqs_cis, mask)
+            layer_output: TransformerBlockOutput = layer(x, seq_lens, freqs_cis, mask, drop_out_p)
             x = layer_output.hidden_state
             if self.config.output_hidden_states:
                 hidden_states += (layer_output.hidden_state, )
@@ -238,8 +250,8 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
 
-    def forward(self, x: Tensor, seq_lens: Tensor, freqs_cis: Tensor, mask: Tensor) -> TransformerBlockOutput:
-        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, seq_lens)
+    def forward(self, x: Tensor, seq_lens: Tensor, freqs_cis: Tensor, mask: Tensor, drop_out_p: float=0) -> TransformerBlockOutput:
+        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, seq_lens, drop_out_p)
         h = x + attention_output.attention_output
         out = h + self.feed_forward(self.ffn_norm(h))
         return TransformerBlockOutput(
@@ -269,7 +281,7 @@ class Attention(nn.Module):
             wv = state_dict.pop(prefix + "wv.weight")
             state_dict[prefix + "wqkv.weight"] = torch.cat([wq, wk, wv])
 
-    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, seq_lens: Tensor = None) -> AttentionOutput:
+    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, seq_lens: Tensor = None, drop_out_p: float = 0) -> AttentionOutput:
         bsz, seqlen, _ = x.shape
 
         kv_size = self.config.n_local_heads * self.config.head_dim
@@ -289,7 +301,7 @@ class Attention(nn.Module):
 
         k = k.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
         v = v.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
-        y, attn_weight = scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        y, attn_weight = scaled_dot_product_attention(q, k, v, attn_mask=mask, drop_out_p=drop_out_p)
 
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.config.dim)
 
@@ -353,7 +365,7 @@ def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
 
 # An alternative implementation of `torch.nn.functions.scaled_dot_product_attention`
 # that outputs the attention weights.
-def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_mask:Optional[Tensor]=None, dropout_p:float=0.0, is_causal:bool=False, scale:float=None) -> Tuple[Tensor]:
+def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_mask:Optional[Tensor]=None, drop_out_p:float=0.0, is_causal:bool=False, scale:float=None) -> Tuple[Tensor]:
     device = query.device
     L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
@@ -373,6 +385,6 @@ def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_ma
     attn_weight += attn_bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
     attn_weight = torch.nan_to_num(attn_weight, nan=0.0)
-    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+    attn_weight = torch.dropout(attn_weight, drop_out_p, train=True)
     attn_output = attn_weight @ value
     return attn_output, attn_weight
