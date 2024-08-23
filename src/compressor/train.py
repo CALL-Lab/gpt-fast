@@ -11,6 +11,7 @@ import numpy as np
 from typing import Optional, Tuple, List
 from datetime import datetime
 import os
+import wandb as wb
 
 
 wd = Path(__file__).parent.parent.parent.resolve()
@@ -24,14 +25,40 @@ from train_utils import remove_elements_by_indices_np, extract_hidden_states, \
 
 
 BATCH_SIZE = 5
-EPOCHS = 10
-update_freq = 2
+# EPOCHS = 10
+update_freq = 1
 eval_freq = 20
-LR = 5e-4
+LR = 2e-4
 DROP_OUT_P = 0.1
-datasets_num = 5
+datasets_num = 14
 MAX_seq_len = 96
 device = "cuda"
+PRIVATE_WB_KEY = "your_wb_key"
+
+
+# Initiate W&B experiment tracker
+os.environ["WANDB_API_KEY"] = PRIVATE_WB_KEY
+wb.login(key=PRIVATE_WB_KEY)
+wb_run = wb.init(
+    # set the wandb project where this run will be logged
+    project="compressor training",
+    reinit=True,
+    mode="online",
+    # track hyperparameters and run metadata
+    config={
+        "train_mode": "compressor",
+        "batch_size": BATCH_SIZE,
+        # "epochs": EPOCHS,
+        "update_freq": update_freq,
+        "eval_freq": eval_freq,
+        "lr": LR,
+        "drop_out_p": DROP_OUT_P,
+        "datasets_num": datasets_num,
+        "max_seq_len": MAX_seq_len,
+        "device": device,
+    }
+)
+
 
 class simple_Dataset_dataloader():
     def __init__(self, datasetDict) -> None:
@@ -115,6 +142,7 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
             return end_flag
         # calc loss and train
         average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn)
+        wb_run.log({"[LOSS] train_loss": average_batch_loss.item()})
         # update accumulate loss
         total_loss += average_batch_loss
         # trainer step
@@ -134,12 +162,12 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
                 return end_flag
             with torch.no_grad():
                 test_average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn)
-                print(f"Test loss: {test_average_batch_loss.item()}")
+                wb_run.log({"[LOSS] test_loss": test_average_batch_loss.item()})
+                print(f"----- Test loss: {test_average_batch_loss.item()} -----")
         
-    return compress_model
+    return end_flag
 
 def main():
-    device = "cuda"
     model_args = gptFast.ModelArgs(**gptFast.transformer_configs["Llama-3-8B"], max_seq_length=MAX_seq_len, output_hidden_states=True, output_attentions=True)
     # load tokenizer, llama3 uses tiktoken
     tokenizer = gptFastTokenizer.TiktokenWrapper("/home/yuhao/work/code_repo/gpt-fast/tokenizer.model")
@@ -161,10 +189,10 @@ def main():
     full_dataset_dict = full_dataset.train_test_split(test_size=0.1)
     dataloader = simple_Dataset_dataloader(full_dataset_dict)
     
-    trained_compressor = train_loop(compress_model, llm_model, tokenizer, dataloader)
-    # get current time
+    train_loop(compress_model, llm_model, tokenizer, dataloader)
+    # save trained model
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    torch.save(trained_compressor.state_dict(), os.path.join("src/compressor/trained_models", f"{current_time}_compress_model.pth"))
+    torch.save(compress_model.state_dict(), os.path.join("src/compressor/trained_models", f"{current_time}_compress_model.pth"))
     
 if __name__ == "__main__":
     main()
