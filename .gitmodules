@@ -1,3 +1,4 @@
 [submodule "src/compress_dataset"]
 	path = src/compress_dataset
 	url = https://github.com/CALL-Lab/dataset-preprocessor.git
+	branch = stage_1_2_3
