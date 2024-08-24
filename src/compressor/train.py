@@ -32,12 +32,12 @@ LR = 5e-2
 DROP_OUT_P = 0.0
 datasets_num = 14
 MAX_seq_len = 96
-embedding_scale = 1e-2
+embedding_scale = 1e-3
 
 device = "cuda"
 
 
-PRIVATE_WB_KEY = "0eb9debfb7883d44f3f302d959e1e8d24fe83caf" #"your_wb_key"
+PRIVATE_WB_KEY = "your_wb_key"
 
 
 # Initiate W&B experiment tracker
@@ -119,7 +119,7 @@ def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: 
         with torch.no_grad():
             to_eval_output = llm_model(idx = padded_reserved_tokens, seq_lens = eval_seq_len, tok_level_pad_mask = True,
                                     compression_eval = True, compressed_tokens = compressed_tokens)
-            batch_hidden_states = extract_single_compressed_hidden_states(to_eval_output, seq_len_lst=eval_seq_len, layer_idx=32, pad_mode='left')
+            batch_hidden_states = extract_single_compressed_hidden_states(to_eval_output, seq_len_lst=eval_seq_len, layer_idx=32, pad_mode='left', device=device)
         
         batch_loss, batch_size = MSE_anom_batch_loss_fn(loss_fn, batch_hidden_states, extracted_hidden_states)
         average_batch_loss = batch_loss/batch_size
@@ -134,7 +134,7 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
     
     dataloader.head_reset()
     loss_fn = MSELoss(reduction='mean')
-    optimizer = torch.optim.AdamW(compress_model.parameters(), lr=LR)
+    optimizer = torch.optim.SGD(compress_model.parameters(), lr=LR)
     
     total_loss = float(0)
     training_step = 0
@@ -143,9 +143,10 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
         data_rows, end_flag = dataloader.dataset_get_batch(BATCH_SIZE, split='train')
         if end_flag:
             print('End of train dataset')
-            return end_flag
+            dataloader.head_reset()
+            # return end_flag
         # calc loss and train
-        average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn)
+        average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn, device)
         wb_run.log({"[LOSS] train_loss": average_batch_loss.item()})
         # update accumulate loss
         total_loss += average_batch_loss

@@ -41,7 +41,7 @@ def extract_hidden_states(outputs: TransformerOutput, compress_idxes_lst: List[L
     assert len(extracted_hidden_states) == len(seq_len_lst), "The seqs number of extracted_hidden_states and seq_len_lst should be the same."
     return extracted_hidden_states
 
-def extract_single_compressed_hidden_states(outputs: TransformerOutput, seq_len_lst: List[int], layer_idx=32, pad_mode='left'):
+def extract_single_compressed_hidden_states(outputs: TransformerOutput, seq_len_lst: List[int], layer_idx=32, pad_mode='left', device='cuda'):
     '''
     compress_idx(list[list[int]]): [seq_id: [token_id: num_compressed_tokens]]
     seq_len_lst(list[int]): [seq: seq_len]
@@ -53,7 +53,7 @@ def extract_single_compressed_hidden_states(outputs: TransformerOutput, seq_len_
     extracted_hidden_states = []
     for seq_id in range(len(seq_len_lst)):
         cur_attn_proj_hidden_state = batch_hidden_state[seq_id, -seq_len_lst[seq_id]+1: , :]
-        extracted_hidden_states.append(cur_attn_proj_hidden_state)
+        extracted_hidden_states.append(cur_attn_proj_hidden_state.to(device))
     
     assert len(extracted_hidden_states) == len(seq_len_lst), "The seqs number of extracted_hidden_states and seq_len_lst should be the same."
     return extracted_hidden_states
