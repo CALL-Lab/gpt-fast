@@ -28,12 +28,16 @@ BATCH_SIZE = 5
 # EPOCHS = 10
 update_freq = 1
 eval_freq = 20
-LR = 2e-4
-DROP_OUT_P = 0.1
+LR = 5e-2
+DROP_OUT_P = 0.0
 datasets_num = 14
 MAX_seq_len = 96
+embedding_scale = 1e-2
+
 device = "cuda"
-PRIVATE_WB_KEY = "your_wb_key"
+
+
+PRIVATE_WB_KEY = "0eb9debfb7883d44f3f302d959e1e8d24fe83caf" #"your_wb_key"
 
 
 # Initiate W&B experiment tracker
@@ -111,13 +115,13 @@ def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: 
             extracted_hidden_states[i] = hidden_state.to(device)
         
         compressor_output = compress_model(idx = padded_braced_tokens, seq_lens = braced_len, tok_level_pad_mask = True, drop_out_p=DROP_OUT_P)
-        compressed_tokens = compressor_output[:, -1, :] # choose the last token's out put as the compressed token
+        compressed_tokens = compressor_output[:, -1, :] * embedding_scale # choose the last token's out put as the compressed token
         with torch.no_grad():
             to_eval_output = llm_model(idx = padded_reserved_tokens, seq_lens = eval_seq_len, tok_level_pad_mask = True,
                                     compression_eval = True, compressed_tokens = compressed_tokens)
             batch_hidden_states = extract_single_compressed_hidden_states(to_eval_output, seq_len_lst=eval_seq_len, layer_idx=32, pad_mode='left')
         
-        batch_loss, batch_size = MSE_anom_batch_loss_fn(loss_fn, extracted_hidden_states, batch_hidden_states)
+        batch_loss, batch_size = MSE_anom_batch_loss_fn(loss_fn, batch_hidden_states, extracted_hidden_states)
         average_batch_loss = batch_loss/batch_size
         
         return average_batch_loss
@@ -146,7 +150,7 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
         # update accumulate loss
         total_loss += average_batch_loss
         # trainer step
-        if training_step % update_freq == 1:
+        if training_step % update_freq == 0:
             total_loss = total_loss/update_freq
             print(f"Train loss: {total_loss.item()}")
             optimizer.zero_grad()
