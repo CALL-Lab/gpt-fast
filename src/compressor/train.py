@@ -47,7 +47,7 @@ wb_run = wb.init(
     # set the wandb project where this run will be logged
     project="compressor training",
     reinit=True,
-    mode="offline",
+    mode="online",
     # track hyperparameters and run metadata
     config={
         "train_mode": "compressor",
@@ -143,8 +143,8 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
         data_rows, end_flag = dataloader.dataset_get_batch(BATCH_SIZE, split='train')
         if end_flag:
             print('End of train dataset')
-            dataloader.head_reset()
-            # return end_flag
+            # dataloader.head_reset()
+            return end_flag
         # calc loss and train
         average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn, device)
         wb_run.log({"[LOSS] train_loss": average_batch_loss.item()})
