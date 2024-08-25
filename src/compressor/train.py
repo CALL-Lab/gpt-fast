@@ -32,12 +32,12 @@ LR = 5e-2
 DROP_OUT_P = 0.0
 datasets_num = 14
 MAX_seq_len = 96
-embedding_scale = 1e-3
+embedding_scale = 3e-4
 
 device = "cuda"
 
 
-PRIVATE_WB_KEY = "7a64e6fc350fede200983db7a5d9d1d93a147531" #"your_wb_key"
+PRIVATE_WB_KEY = "your_wb_key"
 
 
 # Initiate W&B experiment tracker
@@ -180,7 +180,7 @@ def main():
     tokenizer = gptFastTokenizer.TiktokenWrapper("/home/yuhao/work/code_repo/gpt-fast/tokenizer.model")
     llm_model = gptFast.Transformer.from_pretrained(model_args, "/home/yuhao/work/code_repo/gpt-fast/consolidated.00.pth", device)
     for param in llm_model.parameters():
-        param.requires_grad = True
+        param.requires_grad = False
     compressor_args = gptFast.ModelArgs(**transformer_configs["compressor"], max_seq_length=MAX_seq_len, output_hidden_states=False, output_attentions=False)
     compress_model = compress_Transformer.creat_compressor(compressor_args, device,
                                                          embedding_model_dict_path="consolidated.00.pth", 
