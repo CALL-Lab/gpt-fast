@@ -114,7 +114,7 @@ class compress_Transformer(nn.Module):
             x = tok_masks.type(x.dtype).unsqueeze(-1) * x
         # attention layers
         for i, layer in enumerate(self.layers):
-            layer_output: TransformerBlockOutput = layer(x, seq_lens, freqs_cis, mask, drop_out_p=drop_out_p)
+            layer_output: TransformerBlockOutput = layer(x, seq_lens, freqs_cis, masks, drop_out_p=drop_out_p)
             x = layer_output.hidden_state
             # if self.config.output_hidden_states:
             #     hidden_states += (layer_output.hidden_state, )

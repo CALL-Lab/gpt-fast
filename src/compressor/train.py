@@ -37,7 +37,7 @@ embedding_scale = 1e-3
 device = "cuda"
 
 
-PRIVATE_WB_KEY = "your_wb_key"
+PRIVATE_WB_KEY = "7a64e6fc350fede200983db7a5d9d1d93a147531" #"your_wb_key"
 
 
 # Initiate W&B experiment tracker
@@ -47,7 +47,7 @@ wb_run = wb.init(
     # set the wandb project where this run will be logged
     project="compressor training",
     reinit=True,
-    mode="online",
+    mode="offline",
     # track hyperparameters and run metadata
     config={
         "train_mode": "compressor",
@@ -93,15 +93,16 @@ class simple_Dataset_dataloader():
         self.cur_test_row_id = 0
 
 
-def MSE_anom_batch_loss_fn(mse_loss_fn: MSELoss, output_ls: List[Tensor], target_ls: List[Tensor]) -> Tensor:
+def MSE_anom_batch_loss_fn(mse_loss_fn: MSELoss, output_ls: List[Tensor], target_ls: List[Tensor]) -> Tuple[Tensor,int]:
     assert len(output_ls) == len(target_ls), "batch size between output and target should be the same."
-    total_loss = float(0)
+    losses = []
     for i,output in enumerate(output_ls):
         assert output.shape == target_ls[i].shape, "reserved tokens hidden states should have the same shape."
         loss = mse_loss_fn(output, target_ls[i])
-        total_loss += loss
+        losses.append(loss)
     batch_size = i+1
-    return total_loss, batch_size
+    b_loss = torch.stack(losses).mean()
+    return b_loss, batch_size
         
 
 def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: gptFast.Transformer, data_rows: dict, loss_fn: MSELoss, device: str = "cuda") -> Tensor:
@@ -112,19 +113,18 @@ def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: 
         eval_seq_len = data_rows['eval_seq_len'].to(device)
         extracted_hidden_states = data_rows['extracted_hidden_states']
         for i, hidden_state in enumerate(extracted_hidden_states):
-            extracted_hidden_states[i] = hidden_state.to(device)
+            extracted_hidden_states[i] = hidden_state.to(device, dtype=torch.bfloat16)
         
         compressor_output = compress_model(idx = padded_braced_tokens, seq_lens = braced_len, tok_level_pad_mask = True, drop_out_p=DROP_OUT_P)
         compressed_tokens = compressor_output[:, -1, :] * embedding_scale # choose the last token's out put as the compressed token
-        with torch.no_grad():
-            to_eval_output = llm_model(idx = padded_reserved_tokens, seq_lens = eval_seq_len, tok_level_pad_mask = True,
-                                    compression_eval = True, compressed_tokens = compressed_tokens)
-            batch_hidden_states = extract_single_compressed_hidden_states(to_eval_output, seq_len_lst=eval_seq_len, layer_idx=32, pad_mode='left', device=device)
+        # with torch.no_grad():
+        to_eval_output = llm_model(idx = padded_reserved_tokens, seq_lens = eval_seq_len, tok_level_pad_mask = True,
+                                compression_eval = True, compressed_tokens = compressed_tokens)
+        batch_hidden_states = extract_single_compressed_hidden_states(to_eval_output, seq_len_lst=eval_seq_len, layer_idx=32, pad_mode='left', device=device)
         
-        batch_loss, batch_size = MSE_anom_batch_loss_fn(loss_fn, batch_hidden_states, extracted_hidden_states)
-        average_batch_loss = batch_loss/batch_size
+        avg_batch_loss, batch_size = MSE_anom_batch_loss_fn(loss_fn, batch_hidden_states, extracted_hidden_states)
         
-        return average_batch_loss
+        return avg_batch_loss
         
      
 
@@ -136,7 +136,7 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
     loss_fn = MSELoss(reduction='mean')
     optimizer = torch.optim.SGD(compress_model.parameters(), lr=LR)
     
-    total_loss = float(0)
+    total_loss = torch.tensor(0.0, dtype=torch.bfloat16, device=device)
     training_step = 0
     end_flag = False
     while not end_flag:
@@ -148,14 +148,14 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
         # calc loss and train
         average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn, device)
         wb_run.log({"[LOSS] train_loss": average_batch_loss.item()})
-        # update accumulate loss
+        # update accumulate loss      
         total_loss += average_batch_loss
         # trainer step
         if training_step % update_freq == 0:
             total_loss = total_loss/update_freq
             print(f"Train loss: {total_loss.item()}")
             optimizer.zero_grad()
-            total_loss.backward
+            total_loss.to(dtype=torch.bfloat16).backward()
             optimizer.step()
             total_loss = 0
         training_step += 1
@@ -173,14 +173,18 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
     return end_flag
 
 def main():
+    torch.autograd.set_detect_anomaly(True)
+    
     model_args = gptFast.ModelArgs(**gptFast.transformer_configs["Llama-3-8B"], max_seq_length=MAX_seq_len, output_hidden_states=True, output_attentions=True)
     # load tokenizer, llama3 uses tiktoken
     tokenizer = gptFastTokenizer.TiktokenWrapper("/home/yuhao/work/code_repo/gpt-fast/tokenizer.model")
     llm_model = gptFast.Transformer.from_pretrained(model_args, "/home/yuhao/work/code_repo/gpt-fast/consolidated.00.pth", device)
+    for param in llm_model.parameters():
+        param.requires_grad = True
     compressor_args = gptFast.ModelArgs(**transformer_configs["compressor"], max_seq_length=MAX_seq_len, output_hidden_states=False, output_attentions=False)
     compress_model = compress_Transformer.creat_compressor(compressor_args, device,
                                                          embedding_model_dict_path="consolidated.00.pth", 
-                                                         model_dict_key='tok_embeddings.weight').to(device)
+                                                         model_dict_key='tok_embeddings.weight').to(device, dtype=torch.bfloat16)
     
     dataset_path = Path("dataset/to_train_stage_5")
     compress_datasets = []

@@ -186,14 +186,17 @@ class Transformer(nn.Module):
         if compression_eval:
             assert compressed_tokens is not None, "compressed_token should not be None."
             assert compressed_tokens.shape[0] == x.shape[0], "compressed_token should have the same batch size with input."
-            for i in torch.arange(seq_lens.shape[0]): 
-                x[i, -seq_lens[i], :] = compressed_tokens[i]
-        
+            xtype = x.dtype
+            for i in torch.arange(seq_lens.shape[0]):
+                replace_mask = torch.zeros_like(x, dtype=torch.bool)
+                replace_mask[i, -seq_lens[i], :] = True
+                x = torch.where(replace_mask, compressed_tokens[i], x) 
+            x = x.type(xtype)
         if tok_level_pad_mask:
             x = tok_masks.type(x.dtype).unsqueeze(-1) * x
         # attention layers
         for i, layer in enumerate(self.layers):
-            layer_output: TransformerBlockOutput = layer(x, seq_lens, freqs_cis, mask, drop_out_p)
+            layer_output: TransformerBlockOutput = layer(x, seq_lens, freqs_cis, masks, drop_out_p)
             x = layer_output.hidden_state
             if self.config.output_hidden_states:
                 hidden_states += (layer_output.hidden_state, )
@@ -250,8 +253,8 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
 
-    def forward(self, x: Tensor, seq_lens: Tensor, freqs_cis: Tensor, mask: Tensor, drop_out_p: float=0) -> TransformerBlockOutput:
-        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, mask, seq_lens, drop_out_p)
+    def forward(self, x: Tensor, seq_lens: Tensor, freqs_cis: Tensor, masks: Tensor, drop_out_p: float=0) -> TransformerBlockOutput:
+        attention_output: AttentionOutput = self.attention(self.attention_norm(x), freqs_cis, masks, seq_lens, drop_out_p)
         h = x + attention_output.attention_output
         out = h + self.feed_forward(self.ffn_norm(h))
         return TransformerBlockOutput(
@@ -281,7 +284,7 @@ class Attention(nn.Module):
             wv = state_dict.pop(prefix + "wv.weight")
             state_dict[prefix + "wqkv.weight"] = torch.cat([wq, wk, wv])
 
-    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, seq_lens: Tensor = None, drop_out_p: float = 0) -> AttentionOutput:
+    def forward(self, x: Tensor, freqs_cis: Tensor, masks: Tensor, seq_lens: Tensor = None, drop_out_p: float = 0) -> AttentionOutput:
         bsz, seqlen, _ = x.shape
 
         kv_size = self.config.n_local_heads * self.config.head_dim
@@ -301,7 +304,7 @@ class Attention(nn.Module):
 
         k = k.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
         v = v.repeat_interleave(self.config.n_head // self.config.n_local_heads, dim=1)
-        y, attn_weight = scaled_dot_product_attention(q, k, v, attn_mask=mask, drop_out_p=drop_out_p)
+        y, attn_weight = scaled_dot_product_attention(q, k, v, attn_mask=masks, drop_out_p=drop_out_p)
 
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.config.dim)
 
@@ -367,9 +370,9 @@ def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
 # that outputs the attention weights.
 def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_mask:Optional[Tensor]=None, drop_out_p:float=0.0, is_causal:bool=False, scale:float=None) -> Tuple[Tensor]:
     device = query.device
-    L, S = query.size(-2), key.size(-2)
+    B, L, S = query.size(0), query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=device)
+    attn_bias = torch.zeros(B, L, S, dtype=query.dtype, device=device)
     # if is_causal:
     #     assert attn_mask is None
     #     temp_mask = torch.ones(L, S, dtype=torch.bool, device=device).tril(diagonal=0)
@@ -378,11 +381,11 @@ def scaled_dot_product_attention(query:Tensor, key:Tensor, value:Tensor, attn_ma
 
     if attn_mask is not None:
         if attn_mask.dtype == torch.bool:
-            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+            attn_bias.masked_fill_(attn_mask.logical_not(), -1e5)
         else:
-            attn_mask.type(torch.bool).masked_fill_(attn_mask.logical_not(), float("-inf"))
+            attn_mask.type(torch.bool).masked_fill_(attn_mask.logical_not(), -1e5)
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
-    attn_weight += attn_bias
+    attn_weight += attn_bias.unsqueeze(1).expand(-1, attn_weight.shape[1], -1, -1)
     attn_weight = torch.softmax(attn_weight, dim=-1)
     attn_weight = torch.nan_to_num(attn_weight, nan=0.0)
     attn_weight = torch.dropout(attn_weight, drop_out_p, train=True)
