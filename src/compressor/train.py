@@ -41,7 +41,7 @@ natural_language_test_freq = 10*eval_freq
 device = "cuda"
 
 
-PRIVATE_WB_KEY = "7a64e6fc350fede200983db7a5d9d1d93a147531" #"your_wb_key"
+PRIVATE_WB_KEY = "your_wb_key"
 
 
 # Initiate W&B experiment tracker
