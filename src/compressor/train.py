@@ -22,13 +22,16 @@ import src.gptfast.tokenizer as gptFastTokenizer
 from compressor_model_test import compress_Transformer, transformer_configs
 from train_utils import remove_elements_by_indices_np, extract_hidden_states, \
     extract_single_compressed_hidden_states
-
+import torch.optim.lr_scheduler as lr_scheduler
 
 BATCH_SIZE = 5
-# EPOCHS = 10
+EPOCHS = 50
+DATASET_LENGTH = 125000
+lr_update_freq = DATASET_LENGTH//(BATCH_SIZE*EPOCHS)
 update_freq = 1
 eval_freq = 20
-LR = 5e-2
+grad_check_freq = 30
+LR = 0.1 #5e-2
 DROP_OUT_P = 0.0
 datasets_num = 14
 MAX_seq_len = 96
@@ -55,8 +58,11 @@ wb_run = wb.init(
         # "epochs": EPOCHS,
         "update_freq": update_freq,
         "eval_freq": eval_freq,
-        "lr": LR,
+        "origin_lr": LR,
+        "lr_update_freq": lr_update_freq,
+        "lr_scheduler": "CosineAnnealingLR",
         "drop_out_p": DROP_OUT_P,
+        "embedding_scale": embedding_scale,
         "datasets_num": datasets_num,
         "max_seq_len": MAX_seq_len,
         "device": device,
@@ -129,12 +135,16 @@ def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: 
      
 
 def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transformer, tokenizer: gptFastTokenizer.TiktokenWrapper, dataloader: simple_Dataset_dataloader):
+    # model setup
     compress_model.train()
     llm_model.eval()
-    
+    # dataloader setup
     dataloader.head_reset()
+    # trainer setup
     loss_fn = MSELoss(reduction='mean')
-    optimizer = torch.optim.SGD(compress_model.parameters(), lr=LR)
+    optimizer = torch.optim.Adam(compress_model.parameters(), lr=LR)
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=lr_update_freq)
+    # scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, min_lr=1e-5)
     
     total_loss = torch.tensor(0.0, dtype=torch.bfloat16, device=device)
     training_step = 0
@@ -156,6 +166,16 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
             print(f"Train loss: {total_loss.item()}")
             optimizer.zero_grad()
             total_loss.to(dtype=torch.bfloat16).backward()
+            # grad check
+            if training_step % grad_check_freq == 1:
+                grad_dict = {}
+                for name, param in compress_model.named_parameters():
+                    if param.grad is not None:
+                        grad_dict[f"[Grad] {name}_grad_mean"] = param.grad.mean().item()
+                        grad_dict[f"[Grad] {name}_grad_max"] = param.grad.max().item()
+                        grad_dict[f"[Grad] {name}_grad_min"] = param.grad.min().item()
+                    else: print(f"Alert!!!!! ===== {name} has no grad. ===== !!!!!Alert")
+            # step
             optimizer.step()
             total_loss = 0
         training_step += 1
@@ -169,7 +189,9 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
                 test_average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn)
                 wb_run.log({"[LOSS] test_loss": test_average_batch_loss.item()})
                 print(f"----- Test loss: {test_average_batch_loss.item()} -----")
-        
+        # lr update
+        scheduler.step()
+                
     return end_flag
 
 def main():
@@ -192,7 +214,7 @@ def main():
         ds = Dataset.from_parquet(str(data_file_path))
         if i == 0: print(ds.column_names)
         compress_datasets.append(ds)
-        if i >= datasets_num: break
+        if i >= datasets_num: break 
     full_dataset = concatenate_datasets(compress_datasets)
     full_dataset.set_format(type='torch', columns=['padded_braced_tokens', 'padded_reserved_tokens', 'extracted_hidden_states', 'eval_seq_len', 'braced_len', 'ids'])
     full_dataset_dict = full_dataset.train_test_split(test_size=0.1)
