@@ -36,11 +36,12 @@ DROP_OUT_P = 0.0
 datasets_num = 14
 MAX_seq_len = 96
 embedding_scale = 3e-4
+natural_language_test_freq = 10*eval_freq
 
 device = "cuda"
 
 
-PRIVATE_WB_KEY = "your_wb_key"
+PRIVATE_WB_KEY = "7a64e6fc350fede200983db7a5d9d1d93a147531" #"your_wb_key"
 
 
 # Initiate W&B experiment tracker
@@ -68,7 +69,7 @@ wb_run = wb.init(
         "device": device,
     }
 )
-
+wb_table = wb.Table(columns=["[PRED] compress_pred", "[PRED] origin_pred"])
 
 class simple_Dataset_dataloader():
     def __init__(self, datasetDict) -> None:
@@ -111,7 +112,7 @@ def MSE_anom_batch_loss_fn(mse_loss_fn: MSELoss, output_ls: List[Tensor], target
     return b_loss, batch_size
         
 
-def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: gptFast.Transformer, data_rows: dict, loss_fn: MSELoss, device: str = "cuda") -> Tensor:
+def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: gptFast.Transformer, data_rows: dict, loss_fn: MSELoss, device: str = "cuda", nl_lang_test: bool=False) -> Tensor:
     with torch.device(device=device):
         padded_braced_tokens = data_rows['padded_braced_tokens'].to(device)
         braced_len = data_rows['braced_len'].to(device)
@@ -129,6 +130,10 @@ def compressor_batch_loss_calc(compress_model: compress_Transformer, llm_model: 
         batch_hidden_states = extract_single_compressed_hidden_states(to_eval_output, seq_len_lst=eval_seq_len, layer_idx=32, pad_mode='left', device=device)
         
         avg_batch_loss, batch_size = MSE_anom_batch_loss_fn(loss_fn, batch_hidden_states, extracted_hidden_states)
+            
+        # test natural language
+        if nl_lang_test:
+            return avg_batch_loss, torch.argmax(to_eval_output.logits, dim=2), data_rows['pred']
         
         return avg_batch_loss
         
@@ -170,6 +175,7 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
             if training_step % grad_check_freq == 1:
                 grad_dict = {}
                 for name, param in compress_model.named_parameters():
+                    if name == 'tok_embeddings.weight': continue
                     if param.grad is not None:
                         grad_dict[f"[Grad] {name}_grad_mean"] = param.grad.mean().item()
                         grad_dict[f"[Grad] {name}_grad_max"] = param.grad.max().item()
@@ -189,6 +195,14 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
                 test_average_batch_loss = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn)
                 wb_run.log({"[LOSS] test_loss": test_average_batch_loss.item()})
                 print(f"----- Test loss: {test_average_batch_loss.item()} -----")
+            if training_step % natural_language_test_freq == 1:
+                # test natural language
+                test_nl_loss, compress_pred, origin_pred = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn, nl_lang_test=True)
+                for seq_id in range(origin_pred.shape[0]):
+                    l_cp_pred = tokenizer.decode(compress_pred[seq_id])
+                    l_org_pred = tokenizer.decode(origin_pred[seq_id])
+                    wb_table.add_data(*[l_cp_pred, l_org_pred])
+                wb.log({"pred_compare_table": wb_table})
         # lr update
         scheduler.step()
                 
@@ -216,7 +230,7 @@ def main():
         compress_datasets.append(ds)
         if i >= datasets_num: break 
     full_dataset = concatenate_datasets(compress_datasets)
-    full_dataset.set_format(type='torch', columns=['padded_braced_tokens', 'padded_reserved_tokens', 'extracted_hidden_states', 'eval_seq_len', 'braced_len', 'ids'])
+    full_dataset.set_format(type='torch', columns=['padded_braced_tokens', 'padded_reserved_tokens', 'extracted_hidden_states', 'eval_seq_len', 'braced_len', 'ids', 'pred'])
     full_dataset_dict = full_dataset.train_test_split(test_size=0.1)
     dataloader = simple_Dataset_dataloader(full_dataset_dict)
     
