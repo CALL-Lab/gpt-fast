@@ -181,6 +181,7 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
                         grad_dict[f"[Grad] {name}_grad_max"] = param.grad.max().item()
                         grad_dict[f"[Grad] {name}_grad_min"] = param.grad.min().item()
                     else: print(f"Alert!!!!! ===== {name} has no grad. ===== !!!!!Alert")
+                wb_run.log(grad_dict)
             # step
             optimizer.step()
             total_loss = 0
