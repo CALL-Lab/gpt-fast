@@ -36,7 +36,7 @@ DROP_OUT_P = 0.0
 datasets_num = 14
 MAX_seq_len = 96
 embedding_scale = 3e-4
-natural_language_test_freq = 10*eval_freq
+natural_language_test_freq = 10*eval_freq 
 
 device = "cuda"
 
@@ -197,11 +197,16 @@ def train_loop(compress_model: compress_Transformer, llm_model: gptFast.Transfor
                 print(f"----- Test loss: {test_average_batch_loss.item()} -----")
             if training_step % natural_language_test_freq == 1:
                 # test natural language
-                test_nl_loss, compress_pred, origin_pred = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn, nl_lang_test=True)
-                for seq_id in range(origin_pred.shape[0]):
-                    l_cp_pred = tokenizer.decode(compress_pred[seq_id])
-                    l_org_pred = tokenizer.decode(origin_pred[seq_id])
-                    wb_table.add_data(*[l_cp_pred, l_org_pred])
+                with torch.no_grad():
+                    test_nl_loss, compress_pred, origin_pred = compressor_batch_loss_calc(compress_model, llm_model, data_rows, loss_fn, nl_lang_test=True)
+                    compress_pred = compress_pred.detach().cpu().tolist()
+                    origin_pred = origin_pred.detach().cpu().tolist()
+                    for seq_id in range(len(origin_pred)):
+                        l_cp_pred = tokenizer.decode(compress_pred[seq_id])
+                        l_org_pred = tokenizer.decode(origin_pred[seq_id])
+                        wb_table.add_data(*[l_cp_pred, l_org_pred])
+                        print(f"==========================nl_test_{seq_id}===========================")
+                        print(f"Origin pred: {l_org_pred} ---> Compress pred: {l_cp_pred}\n")
                 wb.log({"pred_compare_table": wb_table})
         # lr update
         scheduler.step()
